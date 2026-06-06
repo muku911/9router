@@ -1,9 +1,23 @@
 import { getProviderConnections, validateApiKey, updateProviderConnection, getSettings } from "@/lib/localDb";
 import { resolveConnectionProxyConfig } from "@/lib/network/connectionProxy";
-import { formatRetryAfter, checkFallbackError, isModelLockActive, buildModelLockUpdate, getEarliestModelLockUntil } from "open-sse/services/accountFallback.js";
+import { formatRetryAfter, checkFallbackError, isModelLockActive, buildModelLockUpdate, getEarliestModelLockUntil, isGroupLockActive, buildGroupLockUpdate, buildClearGroupLockUpdate } from "open-sse/services/accountFallback.js";
 import { MAX_RATE_LIMIT_COOLDOWN_MS } from "open-sse/config/errorConfig.js";
+import { getModelQuotaFamily, PROVIDER_ID_TO_ALIAS } from "open-sse/config/providerModels.js";
 import { resolveProviderId, FREE_PROVIDERS } from "@/shared/constants/providers.js";
 import * as log from "../utils/logger.js";
+
+/**
+ * Resolve the quota family for a given provider+model combination.
+ * Returns "normal" for providers/models without group definitions.
+ * @param {string} providerId - Resolved provider ID (e.g. "antigravity")
+ * @param {string|null} model - Model ID
+ * @returns {string} quotaFamily, e.g. "ag-gemini-flash" or "normal"
+ */
+function resolveQuotaFamily(providerId, model) {
+  if (!model || !providerId) return "normal";
+  const alias = PROVIDER_ID_TO_ALIAS[providerId] || providerId;
+  return getModelQuotaFamily(alias, model);
+}
 
 // Mutex to prevent race conditions during account selection
 let selectionMutex = Promise.resolve();
@@ -60,10 +74,12 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
       return null;
     }
 
-    // Filter out model-locked and excluded connections
+    // Filter out model-locked, group-locked, and excluded connections
+    const quotaFamily = resolveQuotaFamily(providerId, model);
     const availableConnections = connections.filter(c => {
       if (excludeSet.has(c.id)) return false;
       if (isModelLockActive(c, model)) return false;
+      if (isGroupLockActive(c, quotaFamily)) return false;
       return true;
     });
 
@@ -219,9 +235,13 @@ export async function markAccountUnavailable(connectionId, status, errorText, pr
 
   const reason = typeof errorText === "string" ? errorText.slice(0, 100) : "Provider error";
   const lockUpdate = buildModelLockUpdate(model, cooldownMs);
+  const providerId = resolveProviderId(provider);
+  const quotaFamily = resolveQuotaFamily(providerId, model);
+  const groupLockUpdate = buildGroupLockUpdate(quotaFamily, cooldownMs);
 
   await updateProviderConnection(connectionId, {
     ...lockUpdate,
+    ...groupLockUpdate,
     testStatus: "unavailable",
     lastError: reason,
     errorCode: status,
@@ -243,26 +263,46 @@ export async function markAccountUnavailable(connectionId, status, errorText, pr
 /**
  * Clear account error status on successful request.
  * - Clears modelLock_${model} (the model that just succeeded)
- * - Lazy-cleans any other expired modelLock_* keys
+ * - Clears modelGroupLock_${quotaFamily} (the quota family that just succeeded)
+ * - Lazy-cleans any other expired modelLock_* and modelGroupLock_* keys
  * - Resets error state only if no active locks remain
  * @param {string} connectionId
  * @param {object} currentConnection - credentials object (has _connection) or raw connection
  * @param {string|null} model - model that succeeded
+ * @param {string|null} provider - provider to resolve quota family
  */
-export async function clearAccountError(connectionId, currentConnection, model = null) {
+export async function clearAccountError(connectionId, currentConnection, model = null, provider = null) {
   if (!connectionId || connectionId === "noauth") return;
   const conn = currentConnection._connection || currentConnection;
   const now = Date.now();
-  const allLockKeys = Object.keys(conn).filter(k => k.startsWith("modelLock_"));
+
+  // Collect all model lock keys AND all group lock keys
+  const allModelLockKeys = Object.keys(conn).filter(k => k.startsWith("modelLock_"));
+  const allGroupLockKeys = Object.keys(conn).filter(k => k.startsWith("modelGroupLock_"));
+  const allLockKeys = [...allModelLockKeys, ...allGroupLockKeys];
 
   if (!conn.testStatus && !conn.lastError && allLockKeys.length === 0) return;
 
-  // Keys to clear: current model's lock + all expired locks
+  // Resolve quota family for the succeeded model
+  const providerId = provider ? resolveProviderId(provider) : null;
+  const quotaFamily = resolveQuotaFamily(providerId, model);
+
+  // Keys to clear: current model's lock + account-level lock + current group lock + all expired locks
   const keysToClear = allLockKeys.filter(k => {
-    if (model && k === `modelLock_${model}`) return true; // succeeded model
-    if (model && k === "modelLock___all") return true;    // account-level lock
-    const expiry = conn[k];
-    return expiry && new Date(expiry).getTime() <= now;   // expired
+    // Model locks
+    if (k.startsWith("modelLock_")) {
+      if (model && k === `modelLock_${model}`) return true; // succeeded model
+      if (model && k === "modelLock___all") return true;    // account-level lock
+      const expiry = conn[k];
+      return expiry && new Date(expiry).getTime() <= now;   // expired
+    }
+    // Group locks
+    if (k.startsWith("modelGroupLock_")) {
+      if (quotaFamily !== "normal" && k === `modelGroupLock_${quotaFamily}`) return true; // succeeded group
+      const expiry = conn[k];
+      return expiry && new Date(expiry).getTime() <= now;   // expired
+    }
+    return false;
   });
 
   if (keysToClear.length === 0 && conn.testStatus !== "unavailable" && !conn.lastError) return;

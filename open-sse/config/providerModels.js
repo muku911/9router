@@ -82,15 +82,15 @@ export const PROVIDER_MODELS = {
     { id: "iflow-rome-30ba3b", name: "iFlow ROME" },
   ],
   ag: [  // Antigravity - special case: models call different backends
-    { id: "gemini-3-flash-agent", name: "Gemini 3.5 Flash (High)" },
-    { id: "gemini-3.5-flash-low", name: "Gemini 3.5 Flash (Medium)" },
-    { id: "gemini-3.5-flash-extra-low", name: "Gemini 3.5 Flash (Low)" },
-    { id: "gemini-pro-agent", name: "Gemini 3.1 Pro (High)" },
-    { id: "gemini-3.1-pro-low", name: "Gemini 3.1 Pro (Low)" },
-    { id: "claude-sonnet-4-6", name: "Claude Sonnet 4.6 (Thinking)" },
-    { id: "claude-opus-4-6-thinking", name: "Claude Opus 4.6 (Thinking)" },
-    { id: "gpt-oss-120b-medium", name: "GPT-OSS 120B (Medium)" },
-    { id: "gemini-3-flash", name: "Gemini 3 Flash", thinking: false }, // command model; AG strips thinking
+    { id: "gemini-3-flash-agent", name: "Gemini 3.5 Flash (High)", quotaFamily: "ag-gemini" },
+    { id: "gemini-3.5-flash-low", name: "Gemini 3.5 Flash (Medium)", quotaFamily: "ag-gemini" },
+    { id: "gemini-3.5-flash-extra-low", name: "Gemini 3.5 Flash (Low)", quotaFamily: "ag-gemini" },
+    { id: "gemini-pro-agent", name: "Gemini 3.1 Pro (High)", quotaFamily: "ag-gemini" },
+    { id: "gemini-3.1-pro-low", name: "Gemini 3.1 Pro (Low)", quotaFamily: "ag-gemini" },
+    { id: "claude-sonnet-4-6", name: "Claude Sonnet 4.6 (Thinking)", quotaFamily: "ag-ex-gemini" },
+    { id: "claude-opus-4-6-thinking", name: "Claude Opus 4.6 (Thinking)", quotaFamily: "ag-ex-gemini" },
+    { id: "gpt-oss-120b-medium", name: "GPT-OSS 120B (Medium)", quotaFamily: "ag-ex-gemini" },
+    { id: "gemini-3-flash", name: "Gemini 3 Flash", thinking: false, quotaFamily: "ag-gemini" }, // command model; AG strips thinking
   ],
   gh: [  // GitHub Copilot - OpenAI models
     { id: "gpt-3.5-turbo", name: "GPT-3.5 Turbo" },
