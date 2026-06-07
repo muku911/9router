@@ -38,8 +38,8 @@ export const BACKOFF_CONFIG = {
 // Default cooldown for transient/unknown errors
 export const TRANSIENT_COOLDOWN_MS = 30 * 1000;
 
-// Hard cap for provider-reported rate limit cooldown (e.g. codex/antigravity resets_at can be 95h+)
-export const MAX_RATE_LIMIT_COOLDOWN_MS = 7 * 24 * 60 * 60 * 1000;
+// Hard cap for provider-reported rate limit cooldown (e.g. codex/antigravity/kiro resets_at can be 95h+ or next month)
+export const MAX_RATE_LIMIT_COOLDOWN_MS = 32 * 24 * 60 * 60 * 1000;
 
 // Cooldown durations (ms)
 const COOLDOWN = {
