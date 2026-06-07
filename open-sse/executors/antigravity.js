@@ -197,6 +197,64 @@ export class AntigravityExecutor extends BaseExecutor {
     return totalMs > 0 ? totalMs : null;
   }
 
+  // Parse RetryInfo/ErrorInfo from Google API 429 body to extract precise resetsAtMs
+  parseError(response, bodyText) {
+    const base = super.parseError(response, bodyText);
+    if (!bodyText) return base;
+
+    try {
+      const parsed = JSON.parse(bodyText);
+      const details = parsed?.error?.details;
+      let resetsAtMs = null;
+
+      if (Array.isArray(details)) {
+        for (const d of details) {
+          // 1. Try to extract from quotaResetTimeStamp (absolute ISO string)
+          if (d?.["@type"] === "type.googleapis.com/google.rpc.ErrorInfo" && d?.metadata?.quotaResetTimeStamp) {
+            const time = new Date(d.metadata.quotaResetTimeStamp).getTime();
+            if (!isNaN(time) && time > Date.now()) {
+              resetsAtMs = time;
+              break;
+            }
+          }
+          // 2. Try to extract from retryDelay (e.g. "345036.204092768s")
+          if (d?.["@type"] === "type.googleapis.com/google.rpc.RetryInfo" && d?.retryDelay) {
+            const seconds = parseFloat(d.retryDelay);
+            if (!isNaN(seconds) && seconds > 0) {
+              resetsAtMs = Date.now() + seconds * 1000;
+              break;
+            }
+          }
+        }
+      }
+
+      // 3. Fallback to parsing from error message text
+      if (!resetsAtMs) {
+        const message = parsed?.error?.message || parsed?.message || "";
+        const retryMs = this.parseRetryFromErrorMessage(message);
+        if (retryMs) {
+          resetsAtMs = Date.now() + retryMs;
+        }
+      }
+
+      if (resetsAtMs) {
+        base.resetsAtMs = resetsAtMs;
+      }
+    } catch (e) {
+      // Ignore JSON parse errors
+    }
+
+    // 4. Check headers as final fallback
+    if (!base.resetsAtMs) {
+      const retryMs = this.parseRetryHeaders(response.headers);
+      if (retryMs) {
+        base.resetsAtMs = Date.now() + retryMs;
+      }
+    }
+
+    return base;
+  }
+
   async execute({ model, body, stream, credentials, signal, log, proxyOptions = null }) {
     const fallbackCount = this.getFallbackCount();
     let lastError = null;
