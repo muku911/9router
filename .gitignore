@@ -77,4 +77,4 @@ gitbook/README.md
 open-sse.old/
 .graphifyignore
 graphify-out/*
-go-9router/web-ui/node_modules
+go-9router/*
