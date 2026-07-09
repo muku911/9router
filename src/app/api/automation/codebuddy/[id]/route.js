@@ -98,11 +98,19 @@ export async function POST(request, { params }) {
 
       try {
         const provider = account.provider || "cloudflare";
+        let apiKeyVal = account.apiKey || "";
+        let accountIdVal = account.email;
+        if (apiKeyVal.includes("|")) {
+          const parts = apiKeyVal.split("|");
+          apiKeyVal = parts[0];
+          accountIdVal = parts[1];
+        }
+
         const connData = {
           provider: "cloudflare-ai",
           authType: "apikey",
           name: `Cloudflare (${account.email})`,
-          apiKey: account.apiKey,
+          apiKey: apiKeyVal,
           email: account.email,
           priority: 1,
           isActive: true,
@@ -112,10 +120,9 @@ export async function POST(request, { params }) {
         if (provider === "cloudflare") {
           connData.provider = "cloudflare-ai";
           connData.authType = "apikey";
-          connData.apiKey = account.apiKey;
-          // Retrieve account ID if it exists in account details
+          connData.apiKey = apiKeyVal;
           connData.providerSpecificData = {
-            accountId: account.email,
+            accountId: accountIdVal,
           };
         }
 
@@ -147,6 +154,29 @@ export async function POST(request, { params }) {
     return NextResponse.json({ error: "Unknown action" }, { status: 400 });
   } catch (error) {
     console.error("Error in POST /api/automation/codebuddy/[id]:", error);
+    return NextResponse.json({ error: error.message }, { status: 500 });
+  }
+}
+
+export async function GET(request, { params }) {
+  try {
+    const resolvedParams = await params;
+    const accountId = parseInt(resolvedParams.id);
+    const account = await getCodeBuddyAccount(accountId);
+    if (!account) {
+      return NextResponse.json({ error: "Account not found" }, { status: 404 });
+    }
+
+    const logDir = path.join(process.env.DATA_DIR || path.join(process.cwd(), "data"), "logs");
+    const logFilePath = path.join(logDir, `automation_${account.email}.log`);
+
+    if (fs.existsSync(logFilePath)) {
+      const logs = fs.readFileSync(logFilePath, "utf8");
+      return NextResponse.json({ logs });
+    } else {
+      return NextResponse.json({ logs: "Belum ada log untuk akun ini." });
+    }
+  } catch (error) {
     return NextResponse.json({ error: error.message }, { status: 500 });
   }
 }
@@ -235,8 +265,11 @@ function executeCodeBuddySignupSingle(accountId, jobId, settings) {
         }
       }
 
+      const logDir = path.join(process.env.DATA_DIR || path.join(process.cwd(), "data"), "logs");
+      const logFilePath = path.join(logDir, `automation_${account.email}.log`);
+      args.push(`--log-file=${logFilePath}`);
+
       try {
-        const logDir = path.join(process.env.DATA_DIR || path.join(process.cwd(), "data"), "logs");
         fs.mkdirSync(logDir, { recursive: true });
         fs.appendFileSync(
           path.join(logDir, "automation_spawn.log"),
@@ -252,6 +285,23 @@ function executeCodeBuddySignupSingle(accountId, jobId, settings) {
       if (global._codebuddyState?.activeProcesses) {
         global._codebuddyState.activeProcesses.add(child);
       }
+
+      // Stream raw stdout and stderr directly to the log file as diagnostics
+      child.stdout.on("data", (data) => {
+        try {
+          fs.appendFileSync(logFilePath, data.toString());
+        } catch (e) {}
+      });
+
+      let stderrAccumulator = "";
+      child.stderr.on("data", (data) => {
+        const text = data.toString();
+        stderrAccumulator += text;
+        try {
+          fs.appendFileSync(logFilePath, `[STDERR] ${text}`);
+        } catch (e) {}
+      });
+
       let lastStep = "Browser diluncurkan...";
       let done = false;
 
@@ -271,7 +321,7 @@ function executeCodeBuddySignupSingle(accountId, jobId, settings) {
             } else if (parsed.status === "success") {
               done = true;
               const apiKeyToSave = parsed.api_key;
-              await markCodeBuddySuccess(account.id, apiKeyToSave);
+              await markCodeBuddySuccess(account.id, `${apiKeyToSave}|${parsed.account_id || ""}`);
               await updateCodeBuddyJobResult(jobId, 0, {
                 email: account.email,
                 status: "done",
@@ -318,9 +368,12 @@ function executeCodeBuddySignupSingle(accountId, jobId, settings) {
           global._codebuddyState.activeProcesses.delete(child);
         }
         if (!done) {
-          const errMsg = global._codebuddyState?.stopFlag 
+          let errMsg = global._codebuddyState?.stopFlag 
             ? "Dihentikan oleh pengguna." 
             : `Proses terhenti dengan exit code ${code}.`;
+          if (stderrAccumulator.trim()) {
+            errMsg += ` | Stderr: ${stderrAccumulator.trim()}`;
+          }
           await markCodeBuddyError(account.id, errMsg);
           await updateCodeBuddyJobResult(jobId, 0, {
             email: account.email,

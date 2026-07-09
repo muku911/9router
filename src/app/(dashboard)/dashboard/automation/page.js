@@ -49,6 +49,7 @@ function CodeBuddyTab() {
   const [activeJob, setActiveJob] = useState(null);
   const [jobLogs, setJobLogs] = useState([]);
   const clearedEmails = useRef(new Set());
+  const logTerminalRef = useRef(null);
   const [logPage, setLogPage] = useState(1);
   const prevRunningIdx = useRef(-1);
   const logsPerPage = 10;
@@ -99,6 +100,56 @@ function CodeBuddyTab() {
   const [proxyTestResults, setProxyTestResults] = useState({});
   const [testingProxies, setTestingProxies] = useState(false);
   const [selectedIds, setSelectedIds] = useState(new Set());
+
+  // Detailed logs modal state
+  const [detailedLogAccount, setDetailedLogAccount] = useState(null);
+  const [detailedLogContent, setDetailedLogContent] = useState("");
+  const [detailedLogLoading, setDetailedLogLoading] = useState(false);
+
+  useEffect(() => {
+    if (!detailedLogAccount) {
+      setDetailedLogContent("");
+      return;
+    }
+
+    let active = true;
+    let timerId = null;
+
+    async function fetchLogs() {
+      if (!detailedLogAccount) return;
+      try {
+        const res = await fetch(`/api/automation/codebuddy/${detailedLogAccount.id}`);
+        const data = await res.json();
+        if (active && data.logs) {
+          setDetailedLogContent(data.logs);
+        }
+      } catch (err) {
+        console.error("Error fetching logs:", err);
+      }
+    }
+
+    setDetailedLogLoading(true);
+    fetchLogs().finally(() => {
+      if (active) setDetailedLogLoading(false);
+    });
+
+    timerId = setInterval(fetchLogs, 3000);
+
+    return () => {
+      active = false;
+      if (timerId) clearInterval(timerId);
+    };
+  }, [detailedLogAccount]);
+
+  const openDetailedLogs = (id, email) => {
+    setDetailedLogAccount({ id, email });
+  };
+
+  useEffect(() => {
+    if (logTerminalRef.current) {
+      logTerminalRef.current.scrollTop = logTerminalRef.current.scrollHeight;
+    }
+  }, [detailedLogContent]);
 
   const [autoGenerateEmail, setAutoGenerateEmail] = useState(false);
   const [generateCount, setGenerateCount] = useState(5);
@@ -844,7 +895,20 @@ function CodeBuddyTab() {
                               )}
                             </td>
                             <td className="px-2 py-1 text-right text-[10px] text-text-muted font-mono">{timeStr}</td>
-                            <td className="px-2 py-1 text-right whitespace-nowrap">
+                            <td className="px-2 py-1 text-right whitespace-nowrap space-x-1">
+                              <button
+                                onClick={() => {
+                                  const acc = accounts.find(a => a.email.toLowerCase() === log.email.toLowerCase());
+                                  if (acc) {
+                                    openDetailedLogs(acc.id, acc.email);
+                                  } else {
+                                    alert("Account tidak ditemukan.");
+                                  }
+                                }}
+                                className="text-[9px] font-bold px-1.5 py-0.5 rounded cursor-pointer transition-colors text-text-main hover:bg-surface-3 bg-surface-2"
+                              >
+                                Logs
+                              </button>
                               {log.status === "failed" && (
                                 <button
                                   onClick={() => {
@@ -1073,6 +1137,13 @@ function CodeBuddyTab() {
                             </button>
                           )}
                           <button
+                            onClick={() => openDetailedLogs(a.id, a.email)}
+                            className="inline-flex items-center gap-0.5 text-[11px] font-bold text-text-main hover:text-primary hover:underline transition-all cursor-pointer"
+                          >
+                            <span className="material-symbols-outlined text-[13px]">description</span>
+                            Logs
+                          </button>
+                          <button
                             onClick={() => handleSingleDelete(a.id)}
                             className="inline-flex items-center gap-0.5 text-[11px] font-bold text-red-400 hover:text-red-300 hover:underline transition-all cursor-pointer"
                           >
@@ -1229,6 +1300,70 @@ function CodeBuddyTab() {
                   Save Proxies
                 </button>
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Detailed Logs Modal */}
+      {detailedLogAccount && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={() => setDetailedLogAccount(null)}>
+          <div className="bg-surface border border-border-subtle rounded-2xl shadow-2xl w-full max-w-3xl mx-4 max-h-[90vh] overflow-hidden flex flex-col" onClick={(e) => e.stopPropagation()}>
+            <div className="p-5 border-b border-border-subtle flex items-center justify-between">
+              <div>
+                <h3 className="text-base font-bold text-text-main flex items-center gap-2">
+                  <span className="material-symbols-outlined text-primary">description</span>
+                  Automation Activity Log
+                </h3>
+                <p className="text-xs text-text-muted mt-1 font-mono truncate max-w-[450px]">
+                  {detailedLogAccount.email}
+                </p>
+              </div>
+              <button 
+                onClick={() => setDetailedLogAccount(null)}
+                className="text-text-muted hover:text-text-main transition-colors p-1 rounded-lg hover:bg-surface-2 cursor-pointer"
+              >
+                <span className="material-symbols-outlined text-[20px]">close</span>
+              </button>
+            </div>
+            
+            <div className="p-5 flex-1 min-h-0">
+              {detailedLogLoading && !detailedLogContent ? (
+                <div className="flex flex-col items-center justify-center py-16 gap-3">
+                  <div className="w-8 h-8 rounded-full border-2 border-primary/20 border-t-primary animate-spin" />
+                  <p className="text-xs text-text-muted">Loading automation activity logs...</p>
+                </div>
+              ) : (
+                <div className="relative h-full flex flex-col gap-2">
+                  <div 
+                    ref={logTerminalRef}
+                    className="flex-1 min-h-[300px] max-h-[50vh] bg-black/90 text-green-400 p-4 rounded-xl border border-border-subtle overflow-y-auto font-mono text-xs whitespace-pre-wrap leading-relaxed select-all"
+                  >
+                    {detailedLogContent || "Belum ada rekaman log untuk akun ini."}
+                  </div>
+                  <div className="text-[10px] text-text-muted flex justify-between items-center px-1">
+                    <span>Logs update automatically every 3 seconds while this modal is open.</span>
+                    <button 
+                      onClick={() => {
+                        navigator.clipboard.writeText(detailedLogContent);
+                      }}
+                      className="flex items-center gap-1 hover:text-primary transition-colors cursor-pointer"
+                    >
+                      <span className="material-symbols-outlined text-[12px]">content_copy</span>
+                      Copy Logs
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+            
+            <div className="p-5 border-t border-border-subtle flex items-center justify-end gap-3">
+              <button
+                onClick={() => setDetailedLogAccount(null)}
+                className="px-4 py-2 text-xs rounded-lg border border-border-subtle text-text-muted hover:text-text-main transition-colors cursor-pointer"
+              >
+                Close
+              </button>
             </div>
           </div>
         </div>

@@ -23,8 +23,25 @@ from pathlib import Path
 def emit(obj):
     print(json.dumps(obj), flush=True)
 
+# ── Detailed File Logging helper ──────────────────────────────────────────────
+log_file_path = None
+
+def write_detailed_log(msg):
+    global log_file_path
+    if log_file_path:
+        try:
+            timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+            with open(log_file_path, "a", encoding="utf-8") as f:
+                f.write(f"[{timestamp}] {msg}\n")
+        except Exception:
+            pass
+
+def log_detail(msg):
+    write_detailed_log(f"DETAIL: {msg}")
+
 def log_step(msg):
     emit({"step": msg})
+    write_detailed_log(f"STEP: {msg}")
 
 def success(api_key, account_id, email):
     # Clean api_key — extract Bearer token if it's a curl command
@@ -36,9 +53,11 @@ def success(api_key, account_id, email):
     cfut_match = _re_clean.search(r'\b(cfut_[A-Za-z0-9_\-]{30,})\b', api_key)
     if cfut_match:
         api_key = cfut_match.group(1)
+    write_detailed_log(f"SUCCESS: API Key created successfully: {api_key[:10]}...")
     emit({"status": "success", "api_key": api_key, "account_id": account_id, "email": email})
 
 def die(msg):
+    write_detailed_log(f"ERROR: {msg}")
     emit({"status": "error", "error": msg})
     sys.exit(1)
 
@@ -118,6 +137,165 @@ def wait_for_cf_verify_email(base_url, api_key, email, timeout=240):
             log_step(f"Ammail poll error: {e}")
         time.sleep(5)
     return None
+
+
+# ── Gmail/Google Workspace verification automated solvers ──────────────────────
+def get_cf_verify_link_via_imap(imap_email, imap_password, timeout=60):
+    log_step(f"IMAP: Mencoba membaca email verifikasi via IMAP (imap.gmail.com) untuk {imap_email}...")
+    import imaplib
+    import email
+    import re as _re
+    import time
+    
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            # Connect to Gmail IMAP
+            mail = imaplib.IMAP4_SSL("imap.gmail.com", port=993)
+            mail.login(imap_email, imap_password)
+            mail.select("inbox")
+            
+            # Search for emails from Cloudflare
+            status, messages = mail.search(None, '(FROM "noreply@notify.cloudflare.com")')
+            if status == "OK" and messages[0]:
+                mail_ids = messages[0].split()
+                # Check the latest emails first
+                for mail_id in reversed(mail_ids):
+                    status, data = mail.fetch(mail_id, "(RFC822)")
+                    if status == "OK":
+                        raw_email = data[0][1]
+                        msg = email.message_from_bytes(raw_email)
+                        
+                        # Extract email body
+                        body = ""
+                        if msg.is_multipart():
+                            for part in msg.walk():
+                                content_type = part.get_content_type()
+                                content_disposition = str(part.get("Content-Disposition"))
+                                if content_type == "text/html" and "attachment" not in content_disposition:
+                                    try:
+                                        body = part.get_payload(decode=True).decode('utf-8', errors='ignore')
+                                    except Exception:
+                                        pass
+                                    break
+                        else:
+                            body = msg.get_payload(decode=True).decode('utf-8', errors='ignore')
+                        
+                        # Extract verify link
+                        patterns = [
+                            r'https://dash\.cloudflare\.com/email-verification[^\s\'"<>]+',
+                            r'https://[^\s\'"<>]*confirm[^\s\'"<>]*',
+                            r'https://[^\s\'"<>]*verify[^\s\'"<>]*',
+                        ]
+                        for pat in patterns:
+                            links = _re.findall(pat, body)
+                            if links:
+                                verify_link = links[0].rstrip(".")
+                                log_step(f"IMAP: Link verifikasi ditemukan!")
+                                try:
+                                    mail.logout()
+                                except Exception:
+                                    pass
+                                return verify_link
+            try:
+                mail.logout()
+            except Exception:
+                pass
+        except Exception as e:
+            # If the error is credentials or disabled, don't loop endlessly
+            err_str = str(e)
+            if "AUTHENTICATIONFAILED" in err_str or "credential" in err_str.lower():
+                log_step(f"IMAP login failed (incorrect password or 2FA active): {err_str}")
+                break
+            log_step(f"IMAP poll/wait: {e}")
+        time.sleep(5)
+    return None
+
+def verify_email_via_browser_gmail(browser_obj, gmail_email, gmail_password):
+    log_step(f"Browser Gmail: Mencoba login ke Gmail untuk {gmail_email}...")
+    import time
+    new_ctx = None
+    page = None
+    try:
+        new_ctx = browser_obj.new_context()
+        page = new_ctx.new_page()
+        # Go to Google Accounts login page
+        page.goto("https://accounts.google.com/signin/v2/identifier?service=mail", wait_until="domcontentloaded", timeout=45000)
+        time.sleep(2)
+        
+        # Fill email
+        email_input = page.locator("input[type='email'], input[name='identifier'], #identifierId").first
+        email_input.wait_for(state="visible", timeout=15000)
+        email_input.fill(gmail_email)
+        time.sleep(1)
+        
+        # Click Next
+        next_btn = page.locator("button:has-text('Next'), #identifierNext, span:has-text('Next')").first
+        next_btn.click()
+        time.sleep(3)
+        
+        # Fill password
+        pw_input = page.locator("input[type='password'], input[name='Passwd'], input[name='password']").first
+        pw_input.wait_for(state="visible", timeout=15000)
+        pw_input.fill(gmail_password)
+        time.sleep(1)
+        
+        # Click Next
+        next_btn2 = page.locator("button:has-text('Next'), #passwordNext, span:has-text('Next')").first
+        next_btn2.click()
+        
+        # Wait for inbox redirection
+        log_step("Browser Gmail: Menunggu inbox Gmail dimuat...")
+        page.wait_for_url("**/mail/**", timeout=30000)
+        time.sleep(5)
+        
+        # Click Cloudflare email with retry / reload loop
+        cf_row = None
+        for check_attempt in range(5):
+            log_step(f"Browser Gmail: Mencari email Cloudflare (percobaan {check_attempt+1}/5)...")
+            try:
+                cf_row = page.locator("tr[role='row']:has-text('Cloudflare'):visible, tr[role='row']:has-text('noreply@notify.cloudflare.com'):visible, span[email='noreply@notify.cloudflare.com']:visible, span:has-text('Cloudflare'):visible").first
+                cf_row.wait_for(state="visible", timeout=8000)
+                break
+            except Exception:
+                log_step("Browser Gmail: Email belum muncul. Me-reload inbox...")
+                page.reload(wait_until="domcontentloaded")
+                time.sleep(5)
+        
+        if not cf_row:
+            raise Exception("Email Cloudflare tidak ditemukan di inbox Gmail.")
+            
+        cf_row.click()
+        time.sleep(3)
+        
+        # Find verification link in email body (visible only)
+        verify_link_loc = page.locator("a[href*='email-verification']:visible, a:has-text('Verify email'):visible, a:has-text('Verify your email'):visible").first
+        verify_link_loc.wait_for(state="visible", timeout=15000)
+        verify_link = verify_link_loc.get_attribute("href")
+        
+        if verify_link:
+            log_step(f"Browser Gmail: Link verifikasi ditemukan! Mengirim link ke main page...")
+            return verify_link
+    except Exception as e:
+        log_step(f"Browser Gmail error: {e}")
+        if page:
+            try:
+                page.screenshot(path="/tmp/gmail_error.png")
+            except Exception:
+                pass
+    finally:
+        if page:
+            try:
+                page.close()
+            except Exception:
+                pass
+        if new_ctx:
+            try:
+                new_ctx.close()
+            except Exception:
+                pass
+    return False
+
 
 # ── 2Captcha Turnstile solver ───────────────────────────────────────────────────
 # Hardcoded sitekey as fallback — scraping from page is preferred (see get_turnstile_sitekey)
@@ -609,6 +787,7 @@ def main():
     parser.add_argument("--proxy-user")
     parser.add_argument("--proxy-pass")
     parser.add_argument("--2captcha-key", default="", dest="captcha_key")
+    parser.add_argument("--log-file", default="")
     # ── Manual override: skip automation, paste token directly ────────────────
     parser.add_argument("--token", default="",
                         help="Paste CF API token manual — skip seluruh automation")
@@ -617,6 +796,16 @@ def main():
     parser.add_argument("--stagger-delay", type=int, default=0, dest="stagger_delay",
                         help="Delay (detik) sebelum launch browser, untuk stagger concurrent instances")
     args = parser.parse_args()
+
+    # Initialize log file if passed
+    global log_file_path
+    if args.log_file:
+        log_file_path = args.log_file
+        try:
+            with open(log_file_path, "w", encoding="utf-8") as f:
+                f.write(f"=== CLOUDFLARE AUTOMATION LOG FOR {args.email} ===\n")
+        except Exception:
+            pass
 
     # ── Shortcut: jika user paste token manual, langsung simpan ──────────────
     if args.token:
@@ -705,6 +894,7 @@ def main():
 
         # CSRF Token and Response Sniffer for direct API fallbacks
         csrf_token_captured = [None]
+        atok_token_captured = [None]
         def on_request(request):
             try:
                 if "/api/v4/" in request.url or "/client/v4/" in request.url:
@@ -715,6 +905,10 @@ def main():
                 if token and not csrf_token_captured[0]:
                     csrf_token_captured[0] = token
                     log_step(f"CSRF Sniffer: captured token: {token[:12]}...")
+                atok = headers.get("x-atok")
+                if atok and not atok_token_captured[0]:
+                    atok_token_captured[0] = atok
+                    log_step(f"x-atok Sniffer: captured token: {atok[:12]}...")
             except Exception:
                 pass
         page.on("request", on_request)
@@ -2147,10 +2341,10 @@ def main():
 
             try:
                 # Find the "Workers AI" template row and click its "Use template" button
-                # Structure: <tr> or <div> containing "Workers AI" text + "Use template" button
-                wa_row = page.locator("tr:has-text('Workers AI'), li:has-text('Workers AI'), [class*='row']:has-text('Workers AI')").first
+                # Structure: <tr> or <li> containing "Workers AI" text + "Use template" button
+                wa_row = page.locator("tr:has-text('Workers AI'), li:has-text('Workers AI')").first
                 if wa_row.count() > 0 and wa_row.is_visible(timeout=3000):
-                    use_btn = wa_row.locator("button:has-text('Use template'), a:has-text('Use template')")
+                    use_btn = wa_row.locator("button:has-text('Use template'), a:has-text('Use template')").first
                     if use_btn.count() > 0 and use_btn.is_visible(timeout=2000):
                         use_btn.click()
                         time.sleep(3)
@@ -2217,8 +2411,11 @@ def main():
                 try:
                     has_wa = page.evaluate("""
                         () => {
+                            // First check inputs
                             const inputs = Array.from(document.querySelectorAll('input'));
-                            return inputs.some(i => i.value && i.value.includes('Workers AI'));
+                            if (inputs.some(i => i.value && i.value.includes('Workers AI'))) return true;
+                            // Then check if the page body contains Workers AI text
+                            return document.body.textContent.includes('Workers AI');
                         }
                     """)
                     if has_wa:
@@ -2537,9 +2734,13 @@ def main():
                         for (const ctrl of ctrls) {
                             const ph = ctrl.querySelector('[class*="react-select__placeholder"]');
                             if (ph && ph.textContent.trim() === 'Select...') {
-                                // Click the dropdown indicator (the ▼ arrow)
-                                const ind = ctrl.querySelector('[class*="react-select__dropdown-indicator"]');
-                                if (ind) { ind.click(); return 'indicator clicked'; }
+                                // Click the input inside the control to reliably trigger the dropdown
+                                const input = ctrl.querySelector('input');
+                                if (input) {
+                                    input.focus();
+                                    input.click();
+                                    return 'input clicked';
+                                }
                                 ctrl.click();
                                 return 'control clicked';
                             }
@@ -2573,42 +2774,56 @@ def main():
 
                     ar_selected = False
                     if opts_initial.get('opts'):
-                        first = page.locator("[class*='react-select__option']").first
-                        if first.count() > 0 and first.is_visible(timeout=1000):
-                            txt = first.text_content() or "?"
-                            first.click()
-                            time.sleep(0.5)
-                            log_step(f"Account Resources selected (initial): {txt[:60]}")
+                        clicked_opt = page.evaluate("""
+                            () => {
+                                const opt = Array.from(document.querySelectorAll('[class*="react-select__option"]')).find(o => o.offsetParent !== null);
+                                if (opt) {
+                                    opt.click();
+                                    return opt.textContent.trim();
+                                }
+                                return null;
+                            }
+                        """)
+                        if clicked_opt:
+                            log_step(f"Account Resources selected (initial JS): {clicked_opt}")
                             ar_selected = True
 
                     # Step 2: If still empty, try typing "all"
                     if not ar_selected:
                         page.keyboard.type("all", delay=80)
                         time.sleep(2)
-                        opts_all = page.evaluate("""() => {
-                            const opts = Array.from(document.querySelectorAll('[class*="react-select__option"]'));
-                            return opts.filter(o => o.offsetParent !== null).map(o => o.textContent.trim());
-                        }""")
-                        log_step(f"AR after 'all': {opts_all}")
-                        if opts_all:
-                            page.locator("[class*='react-select__option']").first.click()
+                        clicked_opt = page.evaluate("""
+                            () => {
+                                const opt = Array.from(document.querySelectorAll('[class*="react-select__option"]')).find(o => o.offsetParent !== null);
+                                if (opt) {
+                                    opt.click();
+                                    return opt.textContent.trim();
+                                }
+                                return null;
+                            }
+                        """)
+                        if clicked_opt:
                             ar_selected = True
-                            log_step(f"AR selected after 'all': {opts_all[0][:50]}")
+                            log_step(f"AR selected after 'all' JS: {clicked_opt}")
 
                     # Step 3: Try account_id prefix
                     if not ar_selected:
                         page.keyboard.press("Control+a")
                         page.keyboard.type(account_id[:8], delay=80)
                         time.sleep(2)
-                        opts_id = page.evaluate("""() => {
-                            const opts = Array.from(document.querySelectorAll('[class*="react-select__option"]'));
-                            return opts.filter(o => o.offsetParent !== null).map(o => o.textContent.trim());
-                        }""")
-                        log_step(f"AR after acct_id: {opts_id}")
-                        if opts_id:
-                            page.locator("[class*='react-select__option']").first.click()
+                        clicked_opt = page.evaluate("""
+                            () => {
+                                const opt = Array.from(document.querySelectorAll('[class*="react-select__option"]')).find(o => o.offsetParent !== null);
+                                if (opt) {
+                                    opt.click();
+                                    return opt.textContent.trim();
+                                }
+                                return null;
+                            }
+                        """)
+                        if clicked_opt:
                             ar_selected = True
-                            log_step(f"AR selected after acct_id: {opts_id[0][:50]}")
+                            log_step(f"AR selected after acct_id JS: {clicked_opt}")
 
                     if not ar_selected:
                         page.keyboard.press("Escape")
@@ -2624,16 +2839,22 @@ def main():
                                 }});
                                 if (!arCtrl) return 'No Select... control';
                                 const input = arCtrl.querySelector('input');
-                                if (!input) return 'No input';
-                                const fk = Object.keys(input).find(k => k.startsWith('__reactFiber') || k.startsWith('__reactInternalInstance') || k.startsWith('__reactProps'));
+                                
+                                // Walk up DOM tree starting from input or arCtrl to find the React props/fiber key
+                                let el = input || arCtrl;
+                                let fk = null;
+                                while (el) {{
+                                    fk = Object.keys(el).find(k => k.startsWith('__reactFiber') || k.startsWith('__reactInternalInstance') || k.startsWith('__reactProps'));
+                                    if (fk) break;
+                                    el = el.parentElement;
+                                }}
                                 if (!fk) {{
-                                    const allKeys = Object.keys(input).filter(k=>k.startsWith('__')).join(',');
+                                    const allKeys = Object.keys(input || arCtrl).filter(k=>k.startsWith('__')).join(',');
                                     return 'No fiber. React keys: ' + allKeys;
                                 }}
-                                let fiber = input[fk];
-                                for (let i = 0; i < 25; i++) {{
-                                    if (!fiber || !fiber.return) break;
-                                    fiber = fiber.return;
+                                let fiber = el[fk];
+                                for (let i = 0; i < 40; i++) {{
+                                    if (!fiber) break;
                                     const p = fiber.memoizedProps;
                                     if (p && typeof p.onChange === 'function') {{
                                         try {{
@@ -2644,6 +2865,7 @@ def main():
                                             return 'React onChange called OK';
                                         }} catch(e) {{ return 'onChange error: ' + e.message; }}
                                     }}
+                                    fiber = fiber.return;
                                 }}
                                 return 'onChange not found';
                             }}
@@ -2733,10 +2955,20 @@ def main():
                             ]
                         }]
                     })
+                    headers = {
+                        "Content-Type": "application/json",
+                        "Accept": "application/json"
+                    }
+                    if csrf_token_captured[0]:
+                        headers["x-cross-site-security"] = csrf_token_captured[0]
+                        headers["x-cross-site-security-token"] = csrf_token_captured[0]
+                    if atok_token_captured[0]:
+                        headers["x-atok"] = atok_token_captured[0]
+
                     api_resp = page.request.fetch(
-                        "https://api.cloudflare.com/client/v4/user/tokens",
+                        "https://dash.cloudflare.com/api/v4/user/tokens",
                         method="POST",
-                        headers={"Content-Type": "application/json", "Accept": "application/json"},
+                        headers=headers,
                         data=api_payload
                     )
                     log_step(f"CF API /user/tokens status: {api_resp.status}")
@@ -2837,50 +3069,113 @@ def main():
         if not workers_ai_token:
             log_step("Bypass: mencoba membuat API token via fetch API langsung...")
             
+            # Save cookies, CSRF token, x-atok token, and User-Agent into local variables for Python requests/urllib fallback
+            saved_cookies = {}
+            user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:128.0) Gecko/20100101 Firefox/128.0"
+            try:
+                cookies = page.context.cookies()
+                saved_cookies = {c['name']: c['value'] for c in cookies}
+                user_agent = page.evaluate("navigator.userAgent")
+            except Exception as _ce:
+                log_step(f"Could not save cookies/UA: {_ce}")
+                
+            cookie_header = "; ".join([f"{k}={v}" for k, v in saved_cookies.items()]) if saved_cookies else ""
+            
             # Polling wait loop for email verification if code 1211 is returned
             max_verify_attempts = 20 # 5 minutes total
             for attempt in range(max_verify_attempts):
                 try:
                     # Retrieve sniffed CSRF security token
                     sec_token = csrf_token_captured[0] or ""
-                    log_step(f"Bypass sniffer security_token found: {bool(sec_token)}")
+                    atok_token = atok_token_captured[0] or ""
+                    log_step(f"Bypass sniffer security_token found: {bool(sec_token)}, x-atok found: {bool(atok_token)}")
 
-                    api_data = page.evaluate(f"""
-                        async () => {{
-                            try {{
-                                const secToken = "{sec_token}";
-                                const payload = {{
-                                    name: "Workers AI",
-                                    policies: [{{
-                                        effect: "allow",
-                                        resources: {{
-                                            "com.cloudflare.api.account.{account_id}": "*"
-                                        }},
-                                        permission_groups: [
-                                            {{id: "a92d2450e05d4e7bb7d0a64968f83d11"}}, // Workers AI Read
-                                            {{id: "bacc64e0f6c34fc0883a1223f938a104"}}  // Workers AI Edit
-                                        ]
-                                    }}]
-                                }};
+                    browser_closed = False
+                    try:
+                        page.evaluate("1")
+                    except Exception:
+                        browser_closed = True
+
+                    token_payload = {
+                        "name": "Workers AI",
+                        "policies": [{
+                            "effect": "allow",
+                            "resources": {
+                                f"com.cloudflare.api.account.{account_id}": "*"
+                            },
+                            "permission_groups": [
+                                {"id": "a92d2450e05d4e7bb7d0a64968f83d11"}, # Workers AI Read
+                                {"id": "bacc64e0f6c34fc0883a1223f938a104"}  # Workers AI Edit
+                            ]
+                        }]
+                    }
+
+                    api_data = None
+                    if not browser_closed:
+                        try:
+                            api_data = page.evaluate(f"""
+                                async () => {{
+                                    try {{
+                                        const secToken = "{sec_token}";
+                                        const atokToken = "{atok_token}";
+                                        const payload = {json.dumps(token_payload)};
+                                        
+                                        const headers = {{
+                                            'Content-Type': 'application/json',
+                                            'Accept': 'application/json'
+                                        }};
+                                        if (secToken) {{
+                                            headers['x-cross-site-security'] = secToken;
+                                            headers['x-cross-site-security-token'] = secToken;
+                                        }}
+                                        if (atokToken) {{
+                                            headers['x-atok'] = atokToken;
+                                        }}
+
+                                        // Try relative dashboard /api/v4/user/tokens endpoint
+                                        let r = await fetch('/api/v4/user/tokens', {{
+                                            method: 'POST',
+                                            headers: headers,
+                                            body: JSON.stringify(payload)
+                                        }});
+                                        return await r.json();
+                                    }} catch(e) {{
+                                        return {{error: e.message, success: false}};
+                                    }}
+                                }}
+                            """)
+                        except Exception as _eval_err:
+                            log_step(f"page.evaluate bypass error: {_eval_err} — falling back to Python HTTP request")
+                            browser_closed = True
+
+                    if browser_closed or not api_data:
+                        log_step("Browser/context is closed, falling back to direct Python HTTP request...")
+                        try:
+                            req_headers = {
+                                'Content-Type': 'application/json',
+                                'Accept': 'application/json',
+                                'User-Agent': user_agent
+                            }
+                            if sec_token:
+                                req_headers['x-cross-site-security'] = sec_token
+                                req_headers['x-cross-site-security-token'] = sec_token
+                            if atok_token:
+                                req_headers['x-atok'] = atok_token
+                            if cookie_header:
+                                req_headers['Cookie'] = cookie_header
                                 
-                                // Try relative dashboard /api/v4/user/tokens endpoint
-                                let r = await fetch('/api/v4/user/tokens', {{
-                                    method: 'POST',
-                                    headers: {{
-                                        'Content-Type': 'application/json',
-                                        'Accept': 'application/json',
-                                        'x-cross-site-security': secToken,
-                                        'x-cross-site-security-token': secToken
-                                    }},
-                                    body: JSON.stringify(payload)
-                                }});
-                                return await r.json();
-                            }} catch(e) {{
-                                return {{error: e.message, success: false}};
-                            }}
-                        }}
-                    """)
-                    
+                            req = urllib.request.Request(
+                                "https://dash.cloudflare.com/api/v4/user/tokens",
+                                data=json.dumps(token_payload).encode('utf-8'),
+                                headers=req_headers,
+                                method='POST'
+                            )
+                            with urllib.request.urlopen(req, timeout=15) as resp:
+                                api_data = json.loads(resp.read().decode('utf-8'))
+                        except Exception as _py_req_err:
+                            log_step(f"Direct Python HTTP request error: {_py_req_err}")
+                            api_data = {"success": False, "errors": [{"message": str(_py_req_err)}]}
+
                     if api_data and api_data.get("success") and api_data.get("result", {}).get("value"):
                         workers_ai_token = api_data["result"]["value"]
                         log_step(f"Bypass API token created: {workers_ai_token[:10]}...")
@@ -2892,15 +3187,163 @@ def main():
                     
                     if has_verify_error:
                         log_step(f"[VERIFIKASI EMAIL] Email '{args.email}' belum diverifikasi oleh Cloudflare.")
+                        email_verified_ok = False
+                        
+                        # 1. Trigger resend verification email
+                        log_step("Mengirim ulang email verifikasi Cloudflare...")
+                        if not browser_closed:
+                            try:
+                                page.evaluate(f"""
+                                    async () => {{
+                                        try {{
+                                            const secToken = "{sec_token}";
+                                            const atokToken = "{atok_token}";
+                                            const headers = {{}};
+                                            if (secToken) headers['x-cross-site-security'] = secToken;
+                                            if (atokToken) headers['x-atok'] = atokToken;
+                                            await fetch('/api/v4/user/email-verification', {{
+                                                method: 'POST',
+                                                headers: headers
+                                            }});
+                                        }} catch(e) {{}}
+                                    }}
+                                """)
+                                log_step("Email verifikasi di-trigger via browser.")
+                            except Exception as _trig_err:
+                                log_step(f"Trigger verify via browser error: {_trig_err}")
+                        else:
+                            try:
+                                req_headers = {
+                                    'User-Agent': user_agent
+                                }
+                                if sec_token:
+                                    req_headers['x-cross-site-security'] = sec_token
+                                    req_headers['x-cross-site-security-token'] = sec_token
+                                if atok_token:
+                                    req_headers['x-atok'] = atok_token
+                                if cookie_header:
+                                    req_headers['Cookie'] = cookie_header
+                                    
+                                req = urllib.request.Request(
+                                    "https://dash.cloudflare.com/api/v4/user/email-verification",
+                                    headers=req_headers,
+                                    method='POST'
+                                )
+                                with urllib.request.urlopen(req, timeout=15) as resp:
+                                    resp.read()
+                                log_step("Email verifikasi di-trigger via direct Python requests.")
+                            except Exception as _trig_err:
+                                log_step(f"Trigger verify via python requests error: {_trig_err}")
+
+                        # 2. Try Ammail polling if configured
+                        if ammail_ok:
+                            verify_link = wait_for_cf_verify_email(
+                                args.ammail_base_url,
+                                args.ammail_api_key,
+                                args.email,
+                                timeout=60,
+                            )
+                            if verify_link:
+                                log_step("Link verifikasi otomatis ditemukan di Ammail! Membuka link pada halaman utama...")
+                                if not browser_closed:
+                                    try:
+                                        page.goto(verify_link, wait_until="domcontentloaded", timeout=45000)
+                                        time.sleep(5)
+                                        page.goto("https://dash.cloudflare.com/profile/api-tokens/create", wait_until="domcontentloaded", timeout=45000)
+                                        time.sleep(5)
+                                        log_step("Verifikasi email berhasil dilakukan via halaman utama!")
+                                        email_verified_ok = True
+                                    except Exception as _nav_err:
+                                        log_step(f"Error navigating verify link: {_nav_err}")
+                                else:
+                                    try:
+                                        req = urllib.request.Request(
+                                            verify_link,
+                                            headers={'User-Agent': user_agent, 'Cookie': cookie_header}
+                                        )
+                                        with urllib.request.urlopen(req, timeout=15) as resp:
+                                            resp.read()
+                                        log_step("Verifikasi email berhasil dilakukan via direct Python requests!")
+                                        email_verified_ok = True
+                                    except Exception as _nav_err:
+                                        log_step(f"Error requesting verify link: {_nav_err}")
+
+                        # 3. Fallback: Try Gmail IMAP checking
+                        if not email_verified_ok:
+                            try:
+                                imap_link = get_cf_verify_link_via_imap(args.email, args.password, timeout=40)
+                                if imap_link:
+                                    log_step("Link verifikasi otomatis ditemukan via Gmail IMAP! Membuka link pada halaman utama...")
+                                    if not browser_closed:
+                                        try:
+                                            page.goto(imap_link, wait_until="domcontentloaded", timeout=45000)
+                                            time.sleep(5)
+                                            page.goto("https://dash.cloudflare.com/profile/api-tokens/create", wait_until="domcontentloaded", timeout=45000)
+                                            time.sleep(5)
+                                            log_step("Verifikasi email berhasil via halaman utama!")
+                                            email_verified_ok = True
+                                        except Exception as _nav_err:
+                                            log_step(f"Error navigating IMAP verify link: {_nav_err}")
+                                    else:
+                                        try:
+                                            req = urllib.request.Request(
+                                                imap_link,
+                                                headers={'User-Agent': user_agent, 'Cookie': cookie_header}
+                                            )
+                                            with urllib.request.urlopen(req, timeout=15) as resp:
+                                                resp.read()
+                                            log_step("Verifikasi email berhasil via direct Python requests!")
+                                            email_verified_ok = True
+                                        except Exception as _nav_err:
+                                            log_step(f"Error requesting IMAP verify link: {_nav_err}")
+                            except Exception as _imap_err:
+                                log_step(f"Gmail IMAP check skipped/failed: {_imap_err}")
+
+                        # 4. Fallback: Try Gmail Browser Login
+                        if not email_verified_ok and not browser_closed:
+                            try:
+                                gmail_link = verify_email_via_browser_gmail(browser, args.email, args.password)
+                                if gmail_link:
+                                    log_step(f"Gmail browser login menemukan link: {gmail_link[:60]}... Membuka di main page...")
+                                    try:
+                                        page.goto(gmail_link, wait_until="domcontentloaded", timeout=45000)
+                                        time.sleep(5)
+                                        page.goto("https://dash.cloudflare.com/profile/api-tokens/create", wait_until="domcontentloaded", timeout=45000)
+                                        time.sleep(5)
+                                        log_step("Verifikasi email berhasil via halaman utama!")
+                                        email_verified_ok = True
+                                    except Exception as _nav_err:
+                                        log_step(f"Error navigating Gmail verify link on main page: {_nav_err}")
+                            except Exception as _browser_gmail_err:
+                                log_step(f"Gmail browser login failed: {_browser_gmail_err}")
+
+                        if email_verified_ok:
+                            continue
+
+                        # Fallback instructions and standard wait if all automated checks failed
                         log_step("Harap buka inbox email Anda, cari email verifikasi dari Cloudflare, dan klik link verifikasi tersebut.")
                         log_step(f"Menunggu verifikasi... (Attempt {attempt+1}/{max_verify_attempts}, cek lagi dalam 15 detik)")
-                        time.sleep(15)
+                        if not browser_closed:
+                            try:
+                                page.wait_for_timeout(15000)
+                            except Exception:
+                                time.sleep(15)
+                        else:
+                            time.sleep(15)
                     else:
                         log_step(f"Bypass API response: {api_data}")
                         break
                 except Exception as _api_err:
                     log_step(f"Bypass API token fallback error: {_api_err}")
-                    break
+                    # Wait and retry on next attempt in case of transient page reloads
+                    if not browser_closed:
+                        try:
+                            page.wait_for_timeout(15000)
+                        except Exception:
+                            time.sleep(15)
+                    else:
+                        time.sleep(15)
+                    continue
 
         # Strategy A: Global API Key from dashboard UI (last resort — needs OTP from email)
         if not workers_ai_token and ammail_ok:

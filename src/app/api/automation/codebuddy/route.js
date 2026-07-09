@@ -530,17 +530,25 @@ export async function POST(request) {
       for (const acc of ready) {
         try {
           const provider = acc.provider || "cloudflare";
+          let apiKeyVal = acc.apiKey || "";
+          let accountIdVal = acc.email;
+          if (apiKeyVal.includes("|")) {
+            const parts = apiKeyVal.split("|");
+            apiKeyVal = parts[0];
+            accountIdVal = parts[1];
+          }
+
           const connData = {
             provider: "cloudflare-ai",
             authType: "apikey",
             name: `Cloudflare (${acc.email})`,
-            apiKey: acc.apiKey,
+            apiKey: apiKeyVal,
             email: acc.email,
             priority: 1,
             isActive: true,
             testStatus: "unknown",
             providerSpecificData: {
-              accountId: acc.email, // wait, script outputs account_id
+              accountId: accountIdVal,
             }
           };
 
@@ -738,7 +746,7 @@ function executeCodeBuddySignup(accountId, jobId, idx, settings) {
 
           const newApiToken = tokenResult.value;
 
-          await markCodeBuddySuccess(account.id, newApiToken);
+          await markCodeBuddySuccess(account.id, `${newApiToken}|${accountId_}`);
           await updateCodeBuddyJobResult(jobId, idx, {
             email: account.email,
             status: "done",
@@ -841,8 +849,11 @@ function executeCodeBuddySignup(accountId, jobId, idx, settings) {
         }
       }
 
+      const logDir = path.join(process.env.DATA_DIR || path.join(process.cwd(), "data"), "logs");
+      const logFilePath = path.join(logDir, `automation_${account.email}.log`);
+      args.push(`--log-file=${logFilePath}`);
+
       try {
-        const logDir = path.join(process.env.DATA_DIR || path.join(process.cwd(), "data"), "logs");
         fs.mkdirSync(logDir, { recursive: true });
         fs.appendFileSync(
           path.join(logDir, "automation_spawn.log"),
@@ -859,9 +870,20 @@ function executeCodeBuddySignup(accountId, jobId, idx, settings) {
         global._codebuddyState.activeProcesses.add(child);
       }
 
+      // Stream raw stdout and stderr directly to the log file as diagnostics
+      child.stdout.on("data", (data) => {
+        try {
+          fs.appendFileSync(logFilePath, data.toString());
+        } catch (e) {}
+      });
+
       let stderrAccumulator = "";
       child.stderr.on("data", (data) => {
-        stderrAccumulator += data.toString();
+        const text = data.toString();
+        stderrAccumulator += text;
+        try {
+          fs.appendFileSync(logFilePath, `[STDERR] ${text}`);
+        } catch (e) {}
       });
 
       let lastStep = "Browser diluncurkan...";
@@ -883,7 +905,7 @@ function executeCodeBuddySignup(accountId, jobId, idx, settings) {
             } else if (parsed.status === "success") {
               done = true;
               const apiKeyToSave = parsed.api_key;
-              await markCodeBuddySuccess(account.id, apiKeyToSave);
+              await markCodeBuddySuccess(account.id, `${apiKeyToSave}|${parsed.account_id || ""}`);
               await updateCodeBuddyJobResult(jobId, idx, {
                 email: account.email,
                 status: "done",
