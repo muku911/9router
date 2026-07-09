@@ -1,3 +1,10 @@
+# v0.6.0 (2026-07-09)
+
+## Features
+- **Cloudflare Automation**: Port automatic account creation, browser automation settings panel, proxy pool testing, and Ammail temp mail inbox client.
+- **Quota Tracker**: Implement Cloudflare Workers AI quota/limits mechanism and threshold exhaustion handling.
+- **Fixes**: Implement dynamic Python binary path detection (`getPythonExecutable()`) to automatically toggle between macOS host Homebrew installations (`/opt/homebrew/bin/python3`) and Docker container virtualenvs (`/app/.venv`) to resolve spawn exit code `-2` failures. Pin Playwright dependency to version `1.58.0` in both host virtual environment and Docker configurations to fix browser viewport `isMobile` protocol scheme skew errors. Automatically append an exclamation mark (`!`) to registration passwords lacking special characters to satisfy Cloudflare security policy. Add real-time email verification polling wait checks (detecting error `1211`) to prompt users to verify emails in real-time. Sniff request and response headers (`x-cross-site-security`) to support direct API token creation bypasses. Copy `src/automation` folder to the runner image inside `Dockerfile` to ensure runtime standalone compatibility.
+
 # v0.5.18 (2026-07-03)
 
 ## Features

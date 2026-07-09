@@ -227,6 +227,9 @@ export async function runMigrationOnce(adapter) {
   // 2. Additive sync (auto add missing columns/indexes declared in TABLES)
   syncSchemaFromTables(adapter);
 
+  // Seed 200 Cloudflare automation accounts if table is empty
+  seedCloudflareAccounts(adapter);
+
   // 3. One-time legacy JSON import (only if DB was fresh on entry)
   const alreadyImported = fs.existsSync(MIGRATED_MARKER);
   const legacyMain = readJsonSafe(LEGACY_FILES.main);
@@ -282,5 +285,31 @@ export async function runMigrationOnce(adapter) {
     const backupDir = makeBackupDir(`schema-${migInfo.from}-to-${migInfo.to}`);
     try { backupFile(DATA_FILE, backupDir); } catch {}
     pruneOldBackups();
+  }
+}
+
+function seedCloudflareAccounts(adapter) {
+  try {
+    const row = adapter.get("SELECT COUNT(*) as c FROM codebuddyAccounts WHERE provider = 'cloudflare'");
+    if (row && row.c === 0) {
+      console.log("[DB][migrate] Seeding 200 cloudflare automation accounts...");
+      const now = new Date().toISOString();
+      adapter.transaction(() => {
+        for (let i = 1; i <= 200; i++) {
+          const numStr = String(i).padStart(3, "0");
+          const email = `akunai${numStr}@smpit-nfbogor.sch.id`;
+          const password = "TernakAkun123";
+          const ammailAlias = `akunai${numStr}`;
+          adapter.run(
+            `INSERT INTO codebuddyAccounts (email, password, profileDir, signupMethod, ammailAlias, provider, apiKeyStatus, createdAt)
+             VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)`,
+            [email, password, null, "google", ammailAlias, "cloudflare", now]
+          );
+        }
+      });
+      console.log("[DB][migrate] Seeding completed!");
+    }
+  } catch (err) {
+    console.error("[DB][migrate] Seeding cloudflare accounts failed:", err.message);
   }
 }

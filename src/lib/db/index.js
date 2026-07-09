@@ -13,6 +13,7 @@ export {
   createProviderConnection, updateProviderConnection,
   deleteProviderConnection, deleteProviderConnectionsByProvider,
   reorderProviderConnections, cleanupProviderConnections,
+  deleteProviderConnectionByEmailAndProvider,
 } from "./repos/connectionsRepo.js";
 
 // Provider nodes
@@ -66,6 +67,14 @@ export {
 export {
   saveRequestDetail, getRequestDetails, getRequestDetailById,
 } from "./repos/requestDetailsRepo.js";
+
+// Automation
+export {
+  listCodeBuddyAccounts, getCodeBuddyAccount, insertCodeBuddyAccount,
+  bulkDeleteCodeBuddyAccounts, deleteCodeBuddyAccount, markCodeBuddyRunning, markCodeBuddySuccess, markCodeBuddyError, markCanvaEnrolled,
+  createCodeBuddyJob, getCodeBuddyJob, updateCodeBuddyJobStatus, updateCodeBuddyJobResult,
+  insertAmmailOtp, findLatestAmmailOtp, markAmmailOtpUsed, listAmmailOtps, getAmmailOtp, deleteAmmailOtp, deleteAmmailOtpsBulk,
+} from "./repos/automationRepo.js";
 
 // Export/import full DB
 export async function exportDb() {
