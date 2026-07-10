@@ -42,7 +42,7 @@ COPY --from=builder /app/node_modules/next ./node_modules/next
 
 # Install python and playwright/camoufox system deps
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3 python3-pip python3-venv ca-certificates gosu \
+    python3 python3-pip python3-venv ca-certificates gosu xvfb \
     libnss3 libnspr4 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 libxkbcommon0 libxcomposite1 libxdamage1 libxrandr2 libgbm1 libasound2 libpango-1.0-0 libcairo2 \
     libgtk-3-0 libdbus-glib-1-2 libdbus-1-3 libxt6 libx11-xcb1 libxtst6 libxrender1 libxi6 libxss1 libxext6 libxfixes3 \
     && rm -rf /var/lib/apt/lists/*
@@ -59,7 +59,7 @@ RUN mkdir -p /app/data && chown -R node:node /app && \
   ln -sf /app/data-home /root/.9router 2>/dev/null || true
 
 # Fix permissions at runtime (handles mounted volumes) using gosu
-RUN printf '#!/bin/sh\nchown -R node:node /app/data /app/data-home /app/.venv 2>/dev/null || true\nexec gosu node "$@"\n' > /entrypoint.sh && \
+RUN printf '#!/bin/sh\nchown -R node:node /app/data /app/data-home /app/.venv 2>/dev/null || true\nXvfb :1 -screen 0 1920x1080x24 -ac +extension GLX +render -noreset &\nexec gosu node "$@"\n' > /entrypoint.sh && \
   chmod +x /entrypoint.sh
 
 EXPOSE 20128
