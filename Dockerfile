@@ -43,8 +43,8 @@ COPY --from=builder /app/node_modules/next ./node_modules/next
 # Install python and playwright/camoufox system deps
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 python3-pip python3-venv ca-certificates gosu \
-    libnss3 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 libxkbcommon0 libxcomposite1 libxdamage1 libxrandr2 libgbm1 libasound2 libpango-1.0-0 libcairo2 \
-    libgtk-3-0 libdbus-glib-1-2 libxt6 \
+    libnss3 libnspr4 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 libxkbcommon0 libxcomposite1 libxdamage1 libxrandr2 libgbm1 libasound2 libpango-1.0-0 libcairo2 \
+    libgtk-3-0 libdbus-glib-1-2 libdbus-1-3 libxt6 libx11-xcb1 libxtst6 libxrender1 libxi6 libxss1 libxext6 libxfixes3 \
     && rm -rf /var/lib/apt/lists/*
 
 # Set up python venv and prefetch browsers
