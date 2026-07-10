@@ -6,6 +6,25 @@
 - **Automation Logging**: Implement granular file-based step and error logging. Passed `--log-file` to Python signup process, exposed logs via GET endpoint `/api/automation/codebuddy/[id]`, and designed a terminal-style real-time logs modal in the dashboard UI.
 - **Fixes**: Implement dynamic Python binary path detection (`getPythonExecutable()`) to automatically toggle between macOS host Homebrew installations (`/opt/homebrew/bin/python3`) and Docker container virtualenvs (`/app/.venv`) to resolve spawn exit code `-2` failures. Pin Playwright dependency to version `1.58.0` in both host virtual environment and Docker configurations to fix browser viewport `isMobile` protocol scheme skew errors. Automatically append an exclamation mark (`!`) to registration passwords lacking special characters to satisfy Cloudflare security policy. Add real-time email verification polling wait checks (detecting error `1211`) to prompt users to verify emails in real-time. Sniff request and response headers (`x-cross-site-security`) to support direct API token creation bypasses. Copy `src/automation` folder to the runner image inside `Dockerfile` to ensure runtime standalone compatibility. Add stderr logging stream listeners in Next.js backend runner spawns to output full traceback details on failure. Fix Playwright WebSocket heartbeat timeouts during verification loops by replacing synchronous `time.sleep` with `page.wait_for_timeout`. Resolve strict mode violations in template selection by narrowing locators. Optimize Account Resources selection by focusing the React Select input element and implementing a DOM-tree walking React Fiber properties injection fallback. Capture the `x-atok` token from sniffer streams and pass it alongside CSRF tokens to API request fallbacks to resolve 403 authorization failures.
 
+# v0.5.20 (2026-07-07)
+
+## Features
+- **Thinking**: per-model thinking level picker on provider page — appends `(level)` suffix to copied model names for forced reasoning effort across all formats (openai, claude, gemini, deepseek, kimi, qwen, zai, minimax, hunyuan, step)
+- **RTK**: add JS-native git-log filter (#2423)
+- **Caveman**: add targeted upstream-aligned style rules (#2424)
+- **i18n**: add Farsi (fa) language support (#2385)
+
+## Fixes
+- **Thinking**: strip `(level)` suffix from upstream `body.model` so providers no longer reject requests
+- **Translator**: preserve developer instructions in openai-responses conversion (#2434)
+- **count_tokens**: count structured Anthropic blocks (#2419)
+- **Volcengine-ark**: clamp GLM-5 max_tokens to model output ceiling (#2428)
+- **Kimi**: normalize reasoning_effort to backend enum (#2427)
+- **Claude**: reconcile max_tokens vs thinking budget and lift per-model ceiling (#2381)
+- **Kiro**: deliver system prompt natively, add Opus 4.5/4.7/4.8, tolerate dash version ids (#2366)
+- **Headroom**: proxy dashboard through app (#2372)
+- **MITM**: recover from stale lock file on server start
+
 # v0.5.18 (2026-07-03)
 
 ## Features
