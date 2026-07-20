@@ -78,4 +78,13 @@ open-sse.old/
 .graphifyignore
 graphify-out/*
 go-9router/*
-go-9router/*
+
+# Local-only working dirs (notes, vendored repos, scripts, skills)
+.claude/
+.docs/
+.repo/
+.script/
+.codegraph/
+.PR/
+.next-analyze/*
+
